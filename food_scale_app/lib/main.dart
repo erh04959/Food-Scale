@@ -1,122 +1,291 @@
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(const FoodScaleApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class FoodScaleApp extends StatelessWidget {
+  const FoodScaleApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      title: 'Smart Food Scale',
+      theme: ThemeData(primarySwatch: Colors.green),
+      home: const WeightScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class WeightScreen extends StatefulWidget {
+  const WeightScreen({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<WeightScreen> createState() => _WeightScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _WeightScreenState extends State<WeightScreen> {
+  double weight = 0.0;
+  String selectedFood = "Banana";
+  double caloriesBurned = 0.0;
+  bool trackingEnabled = true;
+  final Map<String, double> caloriesPerGram = {
+    "Banana": 0.89,
+    "Rice (cooked)": 1.3,
+    "Chicken breast": 1.65,
+  };
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+  List<Map<String, dynamic>> calorieLog = [];
+  String today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+
+  double get dailyCalories => calorieLog.fold(0.0, (total, entry) {
+    if (entry['date'] == today) {
+      return total + (entry['calories'] ?? 0) - (entry['burned'] ?? 0);
+    }
+    return total;
+  });
+
+  double get calculatedCalories =>
+      weight * (caloriesPerGram[selectedFood] ?? 0.0);
+
+  @override
+  void initState() {
+    super.initState();
+    loadLog();
+  }
+
+  Future<void> loadLog() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString('calorieLog');
+    if (stored != null) {
+      final decoded = List<Map<String, dynamic>>.from(json.decode(stored));
+      setState(() => calorieLog = decoded);
+    }
+  }
+
+  Future<void> saveLog() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('calorieLog', json.encode(calorieLog));
+  }
+
+  void logEntry({bool manual = false}) {
+    if (!trackingEnabled) return;
+    final now = DateTime.now();
+    calorieLog.add({
+      "date": DateFormat('yyyy-MM-dd').format(now),
+      "time": DateFormat('HH:mm:ss').format(now),
+      "food": selectedFood,
+      "weight": manual ? 0.0 : weight,
+      "calories": manual ? weight : calculatedCalories,
+      "burned": caloriesBurned,
     });
+    caloriesBurned = 0.0;
+    saveLog();
+    setState(() {});
+  }
+
+  void editEntry(int index) {
+    final controller = TextEditingController(
+      text: calorieLog[index]['calories'].toString(),
+    );
+    showDialog(
+      context: context,
+      builder:
+          (_) => AlertDialog(
+            title: const Text("Edit Calories"),
+            content: TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: "Calories"),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  final updated = double.tryParse(controller.text);
+                  if (updated != null) {
+                    setState(() {
+                      calorieLog[index]['calories'] = updated;
+                      saveLog();
+                    });
+                  }
+                  Navigator.pop(context);
+                },
+                child: const Text("Save"),
+              ),
+            ],
+          ),
+    );
+  }
+
+  void showManualCalorieInput() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder:
+          (_) => AlertDialog(
+            title: const Text("Add Calories Manually"),
+            content: TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: "Calories"),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  final input = double.tryParse(controller.text);
+                  if (input != null) {
+                    setState(() => weight = input);
+                    logEntry(manual: true);
+                  }
+                  Navigator.pop(context);
+                },
+                child: const Text("Add"),
+              ),
+            ],
+          ),
+    );
+  }
+
+  void showBurnedInput() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder:
+          (_) => AlertDialog(
+            title: const Text("Add Burned Calories"),
+            content: TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: "Calories burned"),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  final input = double.tryParse(controller.text);
+                  if (input != null) {
+                    setState(() => caloriesBurned = input);
+                    logEntry();
+                  }
+                  Navigator.pop(context);
+                },
+                child: const Text("Add"),
+              ),
+            ],
+          ),
+    );
+  }
+
+  Future<void> fetchWeightFromPico() async {
+    const picoUrl = 'http://<PICO_IP_ADDRESS>:5000/weight';
+    try {
+      final response = await http.get(Uri.parse(picoUrl));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        setState(() {
+          weight = data['weight'] ?? 0.0;
+        });
+        logEntry();
+      } else {
+        print('Failed to fetch weight. Status: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('Error fetching weight: $e');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+      appBar: AppBar(title: const Text('Smart Food Scale')),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SwitchListTile(
+              title: const Text("Track Calories"),
+              value: trackingEnabled,
+              onChanged: (val) => setState(() => trackingEnabled = val),
+            ),
+            const SizedBox(height: 10),
             Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+              'Weight: ${weight.toStringAsFixed(2)} g',
+              style: const TextStyle(fontSize: 24),
+            ),
+            const SizedBox(height: 20),
+            DropdownButton<String>(
+              value: selectedFood,
+              items:
+                  caloriesPerGram.keys.map((food) {
+                    return DropdownMenuItem(value: food, child: Text(food));
+                  }).toList(),
+              onChanged: (value) => setState(() => selectedFood = value!),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Calories: ${calculatedCalories.toStringAsFixed(2)} kcal',
+              style: const TextStyle(fontSize: 20),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Burned: ${caloriesBurned.toStringAsFixed(2)} kcal',
+              style: const TextStyle(fontSize: 18),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Net Calories Today: ${dailyCalories.toStringAsFixed(2)} kcal',
+              style: const TextStyle(fontSize: 18),
+            ),
+            const Spacer(),
+            Center(
+              child: ElevatedButton(
+                onPressed: fetchWeightFromPico,
+                child: const Text('Fetch Weight from Scale'),
+              ),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                TextButton(
+                  onPressed: showBurnedInput,
+                  child: const Text("Add Burned Calories"),
+                ),
+                TextButton(
+                  onPressed: showManualCalorieInput,
+                  child: const Text("Add Calories Manually"),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            const Text("Daily Log:", style: TextStyle(fontSize: 18)),
+            Expanded(
+              child: ListView.builder(
+                itemCount: calorieLog.length,
+                itemBuilder: (_, i) {
+                  final entry = calorieLog[i];
+                  if (entry['date'] != today) return const SizedBox.shrink();
+                  return ListTile(
+                    title: Text(
+                      "${entry['food']} - ${entry['weight']}g - ${entry['calories'].toStringAsFixed(1)} kcal",
+                    ),
+                    subtitle: Text(
+                      "${entry['time']} | Burned: ${entry['burned']} kcal",
+                    ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.edit),
+                      onPressed: () => editEntry(i),
+                    ),
+                  );
+                },
+              ),
             ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
