@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:async';
 
 void main() {
   runApp(const FoodScaleApp());
@@ -32,15 +33,34 @@ class _WeightScreenState extends State<WeightScreen> {
   double weight = 0.0;
   String selectedFood = "Banana";
   double caloriesBurned = 0.0;
+  double goalCalories = 2000.0;
   bool trackingEnabled = true;
   final Map<String, double> caloriesPerGram = {
     "Banana": 0.89,
     "Rice (cooked)": 1.3,
     "Chicken breast": 1.65,
+    "Apple": 0.52,
+    "Egg (boiled)": 1.55,
+    "Oatmeal": 0.68,
+    "Salmon": 2.08,
+    "Beef (lean)": 2.5,
+    "Tofu": 0.76,
+    "Almonds": 5.76,
+    "Peanut Butter": 5.88,
+    "Whole Milk": 0.61,
+    "Cheddar Cheese": 4.02,
+    "Pasta (cooked)": 1.31,
+    "Bread (white)": 2.65,
+    "Broccoli": 0.34,
+    "Carrots": 0.41,
+    "Avocado": 1.6,
+    "Granola Bar": 4.7,
+    "Yogurt (plain)": 0.59,
   };
 
   List<Map<String, dynamic>> calorieLog = [];
   String today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+  Timer? updateTimer;
 
   double get dailyCalories => calorieLog.fold(0.0, (total, entry) {
     if (entry['date'] == today) {
@@ -49,6 +69,7 @@ class _WeightScreenState extends State<WeightScreen> {
     return total;
   });
 
+  double get caloriesLeft => goalCalories - dailyCalories;
   double get calculatedCalories =>
       weight * (caloriesPerGram[selectedFood] ?? 0.0);
 
@@ -56,6 +77,16 @@ class _WeightScreenState extends State<WeightScreen> {
   void initState() {
     super.initState();
     loadLog();
+    updateTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => fetchWeightFromPico(),
+    );
+  }
+
+  @override
+  void dispose() {
+    updateTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> loadLog() async {
@@ -72,15 +103,15 @@ class _WeightScreenState extends State<WeightScreen> {
     await prefs.setString('calorieLog', json.encode(calorieLog));
   }
 
-  void logEntry({bool manual = false}) {
+  void logEntryFromSensor() {
     if (!trackingEnabled) return;
     final now = DateTime.now();
     calorieLog.add({
       "date": DateFormat('yyyy-MM-dd').format(now),
       "time": DateFormat('HH:mm:ss').format(now),
       "food": selectedFood,
-      "weight": manual ? 0.0 : weight,
-      "calories": manual ? weight : calculatedCalories,
+      "weight": weight,
+      "calories": calculatedCalories,
       "burned": caloriesBurned,
     });
     caloriesBurned = 0.0;
@@ -88,95 +119,18 @@ class _WeightScreenState extends State<WeightScreen> {
     setState(() {});
   }
 
-  void editEntry(int index) {
-    final controller = TextEditingController(
-      text: calorieLog[index]['calories'].toString(),
-    );
-    showDialog(
-      context: context,
-      builder:
-          (_) => AlertDialog(
-            title: const Text("Edit Calories"),
-            content: TextField(
-              controller: controller,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: "Calories"),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  final updated = double.tryParse(controller.text);
-                  if (updated != null) {
-                    setState(() {
-                      calorieLog[index]['calories'] = updated;
-                      saveLog();
-                    });
-                  }
-                  Navigator.pop(context);
-                },
-                child: const Text("Save"),
-              ),
-            ],
-          ),
-    );
-  }
+  void handleTouchInput(Map<String, dynamic> data) {
+    final bool zero = data['touch1'] ?? false;
+    final bool reset = data['touch2'] ?? false;
+    final bool log = data['touch3'] ?? false;
 
-  void showManualCalorieInput() {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder:
-          (_) => AlertDialog(
-            title: const Text("Add Calories Manually"),
-            content: TextField(
-              controller: controller,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: "Calories"),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  final input = double.tryParse(controller.text);
-                  if (input != null) {
-                    setState(() => weight = input);
-                    logEntry(manual: true);
-                  }
-                  Navigator.pop(context);
-                },
-                child: const Text("Add"),
-              ),
-            ],
-          ),
-    );
-  }
-
-  void showBurnedInput() {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder:
-          (_) => AlertDialog(
-            title: const Text("Add Burned Calories"),
-            content: TextField(
-              controller: controller,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: "Calories burned"),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  final input = double.tryParse(controller.text);
-                  if (input != null) {
-                    setState(() => caloriesBurned = input);
-                    logEntry();
-                  }
-                  Navigator.pop(context);
-                },
-                child: const Text("Add"),
-              ),
-            ],
-          ),
-    );
+    if (zero) {
+      print("Tare requested");
+    } else if (reset) {
+      print("Reset tare requested");
+    } else if (log) {
+      logEntryFromSensor();
+    }
   }
 
   Future<void> fetchWeightFromPico() async {
@@ -185,22 +139,99 @@ class _WeightScreenState extends State<WeightScreen> {
       final response = await http.get(Uri.parse(picoUrl));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
+        final newWeight = data['weight'] ?? 0.0;
         setState(() {
-          weight = data['weight'] ?? 0.0;
+          weight = newWeight;
         });
-        logEntry();
-      } else {
-        print('Failed to fetch weight. Status: ${response.statusCode}');
+        handleTouchInput(data);
       }
     } catch (e) {
       print('Error fetching weight: $e');
     }
   }
 
+  void showManualInputDialog({
+    required String title,
+    required Function(double) onSubmitted,
+  }) {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder:
+          (_) => AlertDialog(
+            title: Text(title),
+            content: TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: "Enter value in kcal",
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  final value = double.tryParse(controller.text);
+                  if (value != null) {
+                    onSubmitted(value);
+                  }
+                  Navigator.pop(context);
+                },
+                child: const Text("Submit"),
+              ),
+            ],
+          ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Smart Food Scale')),
+      appBar: AppBar(
+        title: const Text('Smart Food Scale'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.local_fire_department),
+            tooltip: 'Add Burned Calories',
+            onPressed:
+                () => showManualInputDialog(
+                  title: 'Burned Calories',
+                  onSubmitted: (value) {
+                    setState(() => caloriesBurned = value);
+                  },
+                ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.add),
+            tooltip: 'Add Manual Calories',
+            onPressed:
+                () => showManualInputDialog(
+                  title: 'Add Calories (Manual)',
+                  onSubmitted: (value) {
+                    final now = DateTime.now();
+                    calorieLog.add({
+                      "date": DateFormat('yyyy-MM-dd').format(now),
+                      "time": DateFormat('HH:mm:ss').format(now),
+                      "food": "Manual Entry",
+                      "weight": 0.0,
+                      "calories": value,
+                      "burned": 0.0,
+                    });
+                    saveLog();
+                    setState(() {});
+                  },
+                ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.flag),
+            tooltip: 'Set Goal Calories',
+            onPressed:
+                () => showManualInputDialog(
+                  title: 'Set Daily Goal',
+                  onSubmitted: (value) => setState(() => goalCalories = value),
+                ),
+          ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
@@ -240,27 +271,15 @@ class _WeightScreenState extends State<WeightScreen> {
               'Net Calories Today: ${dailyCalories.toStringAsFixed(2)} kcal',
               style: const TextStyle(fontSize: 18),
             ),
-            const Spacer(),
-            Center(
-              child: ElevatedButton(
-                onPressed: fetchWeightFromPico,
-                child: const Text('Fetch Weight from Scale'),
-              ),
+            Text(
+              'Goal: ${goalCalories.toStringAsFixed(0)} kcal',
+              style: const TextStyle(fontSize: 18),
             ),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                TextButton(
-                  onPressed: showBurnedInput,
-                  child: const Text("Add Burned Calories"),
-                ),
-                TextButton(
-                  onPressed: showManualCalorieInput,
-                  child: const Text("Add Calories Manually"),
-                ),
-              ],
+            Text(
+              'Remaining: ${caloriesLeft.toStringAsFixed(0)} kcal',
+              style: const TextStyle(fontSize: 18, color: Colors.blue),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 20),
             const Text("Daily Log:", style: TextStyle(fontSize: 18)),
             Expanded(
               child: ListView.builder(
@@ -274,10 +293,6 @@ class _WeightScreenState extends State<WeightScreen> {
                     ),
                     subtitle: Text(
                       "${entry['time']} | Burned: ${entry['burned']} kcal",
-                    ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.edit),
-                      onPressed: () => editEntry(i),
                     ),
                   );
                 },
