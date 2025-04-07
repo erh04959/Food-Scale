@@ -134,7 +134,7 @@ class _WeightScreenState extends State<WeightScreen> {
   }
 
   Future<void> fetchWeightFromPico() async {
-    const picoUrl = 'http://<PICO_IP_ADDRESS>:5000/weight';
+    const picoUrl = 'http://172.20.10.4:5000/weight';
     try {
       final response = await http.get(Uri.parse(picoUrl));
       if (response.statusCode == 200) {
