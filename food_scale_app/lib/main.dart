@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'dart:async';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:async';
 
 void main() {
   runApp(const FoodScaleApp());
@@ -31,10 +31,11 @@ class WeightScreen extends StatefulWidget {
 
 class _WeightScreenState extends State<WeightScreen> {
   double weight = 0.0;
+  double? frozenWeight;
+  bool scaleOn = true;
+  Timer? updateTimer;
   String selectedFood = "Banana";
-  double caloriesBurned = 0.0;
-  double goalCalories = 2000.0;
-  bool trackingEnabled = true;
+
   final Map<String, double> caloriesPerGram = {
     "Banana": 0.89,
     "Rice (cooked)": 1.3,
@@ -60,23 +61,12 @@ class _WeightScreenState extends State<WeightScreen> {
 
   List<Map<String, dynamic>> calorieLog = [];
   String today = DateFormat('yyyy-MM-dd').format(DateTime.now());
-  Timer? updateTimer;
-
-  double get dailyCalories => calorieLog.fold(0.0, (total, entry) {
-    if (entry['date'] == today) {
-      return total + (entry['calories'] ?? 0) - (entry['burned'] ?? 0);
-    }
-    return total;
-  });
-
-  double get caloriesLeft => goalCalories - dailyCalories;
-  double get calculatedCalories =>
-      weight * (caloriesPerGram[selectedFood] ?? 0.0);
 
   @override
   void initState() {
     super.initState();
     loadLog();
+    fetchWeightFromPico();
     updateTimer = Timer.periodic(
       const Duration(seconds: 2),
       (_) => fetchWeightFromPico(),
@@ -103,202 +93,151 @@ class _WeightScreenState extends State<WeightScreen> {
     await prefs.setString('calorieLog', json.encode(calorieLog));
   }
 
-  void logEntryFromSensor() {
-    if (!trackingEnabled) return;
+  void logFrozenWeight(double value) {
     final now = DateTime.now();
+    final calories = value * (caloriesPerGram[selectedFood] ?? 0.0);
     calorieLog.add({
       "date": DateFormat('yyyy-MM-dd').format(now),
       "time": DateFormat('HH:mm:ss').format(now),
+      "weight": value,
       "food": selectedFood,
-      "weight": weight,
-      "calories": calculatedCalories,
-      "burned": caloriesBurned,
+      "calories": calories,
     });
-    caloriesBurned = 0.0;
     saveLog();
     setState(() {});
   }
 
-  void handleTouchInput(Map<String, dynamic> data) {
-    final bool zero = data['touch1'] ?? false;
-    final bool reset = data['touch2'] ?? false;
-    final bool log = data['touch3'] ?? false;
-
-    if (zero) {
-      print("Tare requested");
-    } else if (reset) {
-      print("Reset tare requested");
-    } else if (log) {
-      logEntryFromSensor();
+  double get dailyCalories => calorieLog.fold(0.0, (total, entry) {
+    if (entry['date'] == today) {
+      return total + (entry['calories'] ?? 0);
     }
-  }
+    return total;
+  });
 
   Future<void> fetchWeightFromPico() async {
-    const picoUrl = 'http://172.20.10.4:5000/weight';
+    const url =
+        'http://192.168.1.78:5000/weight'; // Replace with your Pico's IP
     try {
-      final response = await http.get(Uri.parse(picoUrl));
+      final response = await http.get(Uri.parse(url));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        final newWeight = data['weight'] ?? 0.0;
+
+        final newFrozen = data['frozen_weight'];
+        final newWeight = (data['weight'] ?? 0.0).toDouble();
+
+        // Use local frozenWeight reference to compare before updating
+        final wasFrozen = frozenWeight != null;
+        final isNowFrozen = newFrozen != null;
+
         setState(() {
-          weight = newWeight;
+          scaleOn = data['scale_on'] ?? true;
+
+          if (isNowFrozen) {
+            final frozenVal = (newFrozen as num).toDouble();
+
+            // Only log the first time it freezes
+            if (!wasFrozen) {
+              frozenWeight = frozenVal;
+              logFrozenWeight(frozenWeight!);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    "📋 Weight frozen and logged: ${frozenWeight!.toStringAsFixed(2)} g",
+                  ),
+                ),
+              );
+            }
+            // Do not update live weight while frozen
+          } else {
+            if (wasFrozen) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text("🔄 Unfrozen — now showing live weight"),
+                ),
+              );
+            }
+            frozenWeight = null;
+            weight = newWeight;
+          }
         });
-        handleTouchInput(data);
       }
     } catch (e) {
-      print('Error fetching weight: $e');
+      print('❌ Error fetching from Pico: $e');
     }
-  }
-
-  void showManualInputDialog({
-    required String title,
-    required Function(double) onSubmitted,
-  }) {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder:
-          (_) => AlertDialog(
-            title: Text(title),
-            content: TextField(
-              controller: controller,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: "Enter value in kcal",
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  final value = double.tryParse(controller.text);
-                  if (value != null) {
-                    onSubmitted(value);
-                  }
-                  Navigator.pop(context);
-                },
-                child: const Text("Submit"),
-              ),
-            ],
-          ),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final displayWeight = frozenWeight ?? weight;
+    final label = frozenWeight != null ? "FROZEN" : "Weight";
+    final calculatedCalories =
+        displayWeight * (caloriesPerGram[selectedFood] ?? 0.0);
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Smart Food Scale'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.local_fire_department),
-            tooltip: 'Add Burned Calories',
-            onPressed:
-                () => showManualInputDialog(
-                  title: 'Burned Calories',
-                  onSubmitted: (value) {
-                    setState(() => caloriesBurned = value);
-                  },
+      appBar: AppBar(title: const Text("Smart Food Scale")),
+      body: AnimatedOpacity(
+        opacity: scaleOn ? 1.0 : 0.3,
+        duration: const Duration(milliseconds: 500),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                "$label: ${displayWeight.toStringAsFixed(2)} g",
+                style: TextStyle(
+                  fontSize: 32,
+                  fontWeight: FontWeight.bold,
+                  color: frozenWeight != null ? Colors.orange : Colors.black,
                 ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.add),
-            tooltip: 'Add Manual Calories',
-            onPressed:
-                () => showManualInputDialog(
-                  title: 'Add Calories (Manual)',
-                  onSubmitted: (value) {
-                    final now = DateTime.now();
-                    calorieLog.add({
-                      "date": DateFormat('yyyy-MM-dd').format(now),
-                      "time": DateFormat('HH:mm:ss').format(now),
-                      "food": "Manual Entry",
-                      "weight": 0.0,
-                      "calories": value,
-                      "burned": 0.0,
-                    });
-                    saveLog();
-                    setState(() {});
-                  },
-                ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.flag),
-            tooltip: 'Set Goal Calories',
-            onPressed:
-                () => showManualInputDialog(
-                  title: 'Set Daily Goal',
-                  onSubmitted: (value) => setState(() => goalCalories = value),
-                ),
-          ),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SwitchListTile(
-              title: const Text("Track Calories"),
-              value: trackingEnabled,
-              onChanged: (val) => setState(() => trackingEnabled = val),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Weight: ${weight.toStringAsFixed(2)} g',
-              style: const TextStyle(fontSize: 24),
-            ),
-            const SizedBox(height: 20),
-            DropdownButton<String>(
-              value: selectedFood,
-              items:
-                  caloriesPerGram.keys.map((food) {
-                    return DropdownMenuItem(value: food, child: Text(food));
-                  }).toList(),
-              onChanged: (value) => setState(() => selectedFood = value!),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              'Calories: ${calculatedCalories.toStringAsFixed(2)} kcal',
-              style: const TextStyle(fontSize: 20),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Burned: ${caloriesBurned.toStringAsFixed(2)} kcal',
-              style: const TextStyle(fontSize: 18),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Net Calories Today: ${dailyCalories.toStringAsFixed(2)} kcal',
-              style: const TextStyle(fontSize: 18),
-            ),
-            Text(
-              'Goal: ${goalCalories.toStringAsFixed(0)} kcal',
-              style: const TextStyle(fontSize: 18),
-            ),
-            Text(
-              'Remaining: ${caloriesLeft.toStringAsFixed(0)} kcal',
-              style: const TextStyle(fontSize: 18, color: Colors.blue),
-            ),
-            const SizedBox(height: 20),
-            const Text("Daily Log:", style: TextStyle(fontSize: 18)),
-            Expanded(
-              child: ListView.builder(
-                itemCount: calorieLog.length,
-                itemBuilder: (_, i) {
-                  final entry = calorieLog[i];
-                  if (entry['date'] != today) return const SizedBox.shrink();
-                  return ListTile(
-                    title: Text(
-                      "${entry['food']} - ${entry['weight']}g - ${entry['calories'].toStringAsFixed(1)} kcal",
-                    ),
-                    subtitle: Text(
-                      "${entry['time']} | Burned: ${entry['burned']} kcal",
-                    ),
-                  );
-                },
               ),
-            ),
-          ],
+              const SizedBox(height: 10),
+              Text(
+                scaleOn ? "Scale ON" : "Scale OFF",
+                style: TextStyle(
+                  color: scaleOn ? Colors.green : Colors.red,
+                  fontSize: 18,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  const Text("Food: "),
+                  Expanded(
+                    child: DropdownButton<String>(
+                      isExpanded: true,
+                      value: selectedFood,
+                      items:
+                          caloriesPerGram.keys.map((food) {
+                            return DropdownMenuItem(
+                              value: food,
+                              child: Text(food),
+                            );
+                          }).toList(),
+                      onChanged:
+                          (value) => setState(() => selectedFood = value!),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text("Calories: ${calculatedCalories.toStringAsFixed(2)} kcal"),
+              Text("Total Today: ${dailyCalories.toStringAsFixed(2)} kcal"),
+              const SizedBox(height: 20),
+              const Divider(),
+              const Text(
+                "Recent Logs",
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              for (var entry in calorieLog.reversed.take(5))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(
+                    "${entry['date']} ${entry['time']} — ${entry['food']} — ${entry['weight']}g = ${entry['calories'].toStringAsFixed(1)} kcal",
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
